@@ -1,7 +1,7 @@
 
 import os
+import shutil
 import subprocess
-import zipfile
 from pathlib import Path
 
 import streamlit as st
@@ -10,28 +10,54 @@ from ultralytics import YOLO
 DATA_DIR = Path("/tmp/yolodemo")
 
 MODEL_RELATIVE_PATHS = {
-    "YOLOv8n": Path("tomato_results_archive/YOLOv8n/selected/selected_model.pt"),
-    "YOLO11n": Path("tomato_results_archive/YOLO11n/selected/selected_model.pt"),
-    "YOLO11s": Path("tomato_results_archive/YOLO11s/selected/selected_model.pt"),
+    "YOLOv8n": Path(
+        "tomato_results_archive/YOLOv8n/selected/selected_model.pt"
+    ),
+    "YOLO11n": Path(
+        "tomato_results_archive/YOLO11n/selected/selected_model.pt"
+    ),
+    "YOLO11s": Path(
+        "tomato_results_archive/YOLO11s/selected/selected_model.pt"
+    ),
 }
 
 
 def download_models():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Không tải lại nếu đã có đủ 3 model
-    if all((DATA_DIR / p).is_file() for p in MODEL_RELATIVE_PATHS.values()):
+    # Đã có đủ model thì không tải lại
+    if all(
+        (DATA_DIR / path).is_file()
+        for path in MODEL_RELATIVE_PATHS.values()
+    ):
         return
 
-    os.environ["KAGGLE_API_TOKEN"] = st.secrets["KAGGLE_API_TOKEN"]
+    token = st.secrets.get("KAGGLE_API_TOKEN")
+    if not token:
+        raise RuntimeError(
+            "Chưa cấu hình KAGGLE_API_TOKEN trong Streamlit Secrets."
+        )
+
+    env = os.environ.copy()
+    env["KAGGLE_API_TOKEN"] = token
+
+    # Xóa ZIP cũ nếu lần tải trước bị lỗi
+    for zip_file in DATA_DIR.glob("*.zip"):
+        zip_file.unlink(missing_ok=True)
 
     result = subprocess.run(
         [
-            "kaggle", "datasets", "download",
-            "-d", "thanhtuanh/yolodemo",
-            "-p", str(DATA_DIR),
+            "kaggle",
+            "datasets",
+            "download",
+            "-d",
+            "thanhtuanh/yolodemo",
+            "-p",
+            str(DATA_DIR),
             "--unzip",
+            "--quiet",
         ],
+        env=env,
         capture_output=True,
         text=True,
         timeout=1800,
@@ -39,39 +65,43 @@ def download_models():
 
     if result.returncode != 0:
         raise RuntimeError(
-            "Không tải được Kaggle Dataset.\n" + result.stderr[-3000:]
+            "Kaggle tải Dataset thất bại.\n"
+            + (result.stderr or result.stdout)[-2000:]
         )
 
-    # Một số Dataset có thể có thêm thư mục bao ngoài.
-    # Tìm file thực tế theo cấu trúc thư mục.
-    for model_name, relative_path in MODEL_RELATIVE_PATHS.items():
-        expected = DATA_DIR / relative_path
-        if expected.is_file():
-            continue
-
-        matches = list(DATA_DIR.rglob("selected_model.pt"))
-        matching = [
-            p for p in matches
-            if p.parts[-4:-1] == (
-                MODEL_RELATIVE_PATHS[model_name].parts[-4:-1]
-            )
-        ]
-
-        if matching:
-            expected.parent.mkdir(parents=True, exist_ok=True)
-            if matching[0] != expected:
-                import shutil
-                shutil.copy2(matching[0], expected)
-
     missing = [
-        name for name, relative_path in MODEL_RELATIVE_PATHS.items()
+        name
+        for name, relative_path in MODEL_RELATIVE_PATHS.items()
         if not (DATA_DIR / relative_path).is_file()
     ]
 
     if missing:
+        # Tìm các model nếu Dataset có thư mục bao ngoài
+        found = list(DATA_DIR.rglob("selected_model.pt"))
+
+        for name in missing[:]:
+            expected = MODEL_RELATIVE_PATHS[name]
+            matches = [
+                p for p in found
+                if p.parent.name == "selected"
+                and p.parent.parent.name == name
+            ]
+
+            if matches:
+                target = DATA_DIR / expected
+                target.parent.mkdir(parents=True, exist_ok=True)
+                if matches[0] != target:
+                    shutil.copy2(matches[0], target)
+
+        missing = [
+            name
+            for name, relative_path in MODEL_RELATIVE_PATHS.items()
+            if not (DATA_DIR / relative_path).is_file()
+        ]
+
+    if missing:
         raise FileNotFoundError(
-            "Không tìm thấy checkpoint cho: " + ", ".join(missing)
-            + ". Hãy kiểm tra cấu trúc file trong Kaggle Dataset."
+            "Không tìm thấy model: " + ", ".join(missing)
         )
 
 
