@@ -1,7 +1,6 @@
-
-streamlit
-ultralytics
-kaggle
+streamlit==1.66.1
+ultralytics==8.4.192
+kaggle==2.2.5
 pandas
 Pillow
 opencv-python-headless==4.11.0.86
