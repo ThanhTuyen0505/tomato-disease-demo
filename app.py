@@ -1,11 +1,15 @@
-
 import time
 
 import pandas as pd
 import streamlit as st
-from PIL import Image
+from PIL import Image, ImageOps
 
 from model_loader import load_model
+
+
+# ============================================================
+# 1. CẤU HÌNH TRANG
+# ============================================================
 
 st.set_page_config(
     page_title="Tomato AI | Phát hiện bệnh",
@@ -14,7 +18,29 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ==================== GIAO DIỆN ====================
+MODEL_NAMES = [
+    "YOLOv8n",
+    "YOLO11n",
+    "YOLO11s",
+    "RT-DETR-L",
+]
+
+CLASS_NAMES_VI = {
+    "Early Blight": "Bệnh đốm vòng",
+    "Healthy": "Lá khỏe mạnh",
+    "Late Blight": "Bệnh mốc sương",
+    "Leaf Miner": "Sâu vẽ bùa",
+    "Leaf Mold": "Bệnh mốc lá",
+    "Tomato Mosaic Virus": "Virus khảm cà chua",
+    "Septoria Leaf Spot": "Bệnh đốm lá Septoria",
+    "Red Spider Mite": "Nhện đỏ",
+    "TYLCV": "Virus xoăn vàng lá cà chua",
+}
+
+
+# ============================================================
+# 2. GIAO DIỆN
+# ============================================================
 
 st.markdown(
     """
@@ -180,7 +206,10 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# ==================== TIÊU ĐỀ ====================
+
+# ============================================================
+# 3. TIÊU ĐỀ
+# ============================================================
 
 st.markdown(
     """
@@ -189,15 +218,17 @@ st.markdown(
         <p>
             Hệ thống phát hiện bệnh trên lá cà chua bằng trí tuệ nhân tạo.
             <br>
-            Thử nghiệm và so sánh YOLOv8n, YOLO11n và YOLO11s.
+            Thử nghiệm và so sánh YOLOv8n, YOLO11n, YOLO11s và RT-DETR-L.
         </p>
     </div>
     """,
     unsafe_allow_html=True,
 )
 
-# ==================== CẤU HÌNH ====================
 
+# ============================================================
+# 4. THANH CẤU HÌNH
+# ============================================================
 
 with st.sidebar:
     st.markdown("## ⚙️ Cấu hình nhận diện")
@@ -205,7 +236,7 @@ with st.sidebar:
 
     model_name = st.selectbox(
         "🤖 Mô hình AI",
-        ["YOLOv8n", "YOLO11n", "YOLO11s", "RT-DETR-L"],
+        MODEL_NAMES,
         index=1,
     )
 
@@ -235,7 +266,9 @@ with st.sidebar:
     st.caption("Đầu ra: Bounding box, lớp bệnh và confidence")
 
 
-# ==================== TẢI ẢNH ====================
+# ============================================================
+# 5. TẢI ẢNH
+# ============================================================
 
 st.markdown(
     '<div class="section-title">📤 Tải ảnh cần kiểm tra</div>',
@@ -263,13 +296,18 @@ uploaded_file = st.file_uploader(
     key="tomato_image",
 )
 
-# ==================== HIỂN THỊ ẢNH ====================
+
+# ============================================================
+# 6. HIỂN THỊ ẢNH VÀ NHẬN DIỆN
+# ============================================================
 
 if uploaded_file is not None:
     try:
-        image = Image.open(uploaded_file).convert("RGB")
+        # Chuẩn hóa hướng ảnh theo EXIF và chuyển sang RGB.
+        image = ImageOps.exif_transpose(
+            Image.open(uploaded_file)
+        ).convert("RGB")
 
-        st.markdown("")
         col1, col2 = st.columns(2, gap="large")
 
         with col1:
@@ -277,6 +315,7 @@ if uploaded_file is not None:
                 '<div class="panel-title">🖼️ Ảnh đầu vào</div>',
                 unsafe_allow_html=True,
             )
+
             st.image(
                 image,
                 caption=f"Ảnh gốc · {image.width} × {image.height} px",
@@ -289,23 +328,25 @@ if uploaded_file is not None:
                 unsafe_allow_html=True,
             )
 
-            # Khu vực kết quả sẽ được cập nhật sau khi dự đoán.
             result_placeholder = st.empty()
 
-            if "last_result" in st.session_state:
-                previous = st.session_state["last_result"]
-                if previous.get("filename") == uploaded_file.name:
-                    result_placeholder.image(
-                        previous["image"],
-                        caption=(
-                            f"Kết quả {previous['model_name']}"
-                        ),
-                        use_container_width=True,
-                    )
-                else:
-                    result_placeholder.info(
-                        "Nhấn nút bên dưới để phân tích ảnh."
-                    )
+            # Chỉ hiển thị kết quả trước đó nếu toàn bộ cấu hình
+            # vẫn giống lần nhận diện trước.
+            previous = st.session_state.get("last_result")
+
+            if (
+                previous
+                and previous.get("filename") == uploaded_file.name
+                and previous.get("model_name") == model_name
+                and previous.get("confidence") == confidence
+                and previous.get("image_size") == image_size
+                and previous.get("image_bytes") == uploaded_file.getvalue()
+            ):
+                result_placeholder.image(
+                    previous["image"],
+                    caption=f"Kết quả nhận diện · {previous['model_name']}",
+                    use_container_width=True,
+                )
             else:
                 result_placeholder.info(
                     "Ảnh kết quả sẽ xuất hiện tại đây sau khi nhận diện."
@@ -322,20 +363,26 @@ if uploaded_file is not None:
                 with st.spinner(
                     f"Đang tải {model_name} và phân tích ảnh..."
                 ):
+                    # Thời gian tải model và thời gian suy luận
+                    # được đo riêng để dễ theo dõi.
+                    load_start = time.perf_counter()
                     model = load_model(model_name)
+                    load_elapsed = time.perf_counter() - load_start
 
-                    start = time.perf_counter()
+                    inference_start = time.perf_counter()
+
                     result = model.predict(
                         source=image,
                         conf=confidence,
                         imgsz=image_size,
                         verbose=False,
                     )[0]
-                    elapsed = (
-                        time.perf_counter() - start
+
+                    inference_elapsed = (
+                        time.perf_counter() - inference_start
                     ) * 1000
 
-                # Ultralytics trả ảnh BGR, đổi về RGB.
+                # Ultralytics trả ảnh BGR; chuyển sang RGB để hiển thị.
                 annotated_image = result.plot()[..., ::-1].copy()
 
                 result_placeholder.image(
@@ -346,7 +393,10 @@ if uploaded_file is not None:
 
                 st.session_state["last_result"] = {
                     "filename": uploaded_file.name,
+                    "image_bytes": uploaded_file.getvalue(),
                     "model_name": model_name,
+                    "confidence": confidence,
+                    "image_size": image_size,
                     "image": annotated_image,
                 }
 
@@ -366,41 +416,81 @@ if uploaded_file is not None:
                 )
 
                 m1, m2, m3 = st.columns(3, gap="medium")
-                m1.metric("Đối tượng phát hiện", count)
+
+                m1.metric(
+                    "Đối tượng phát hiện",
+                    count,
+                )
+
                 m2.metric(
                     "Confidence cao nhất",
                     f"{max_conf:.1%}",
                 )
+
                 m3.metric(
                     "Thời gian suy luận",
-                    f"{elapsed:.1f} ms",
+                    f"{inference_elapsed:.1f} ms",
                 )
 
                 st.caption(
                     f"Mô hình: {model_name} · "
                     f"Ngưỡng confidence: {confidence:.2f} · "
-                    f"Image size: {image_size}"
+                    f"Image size: {image_size} px"
                 )
 
+                with st.expander("⏱️ Thông tin thời gian xử lý"):
+                    st.write(
+                        f"Thời gian tải/khởi tạo mô hình: "
+                        f"{load_elapsed:.2f} giây"
+                    )
+                    st.write(
+                        f"Thời gian suy luận: "
+                        f"{inference_elapsed:.1f} ms"
+                    )
+
                 if count > 0:
+                    names = result.names
                     rows = []
 
                     for box in boxes:
                         class_id = int(box.cls.item())
+                        score = float(box.conf.item())
+
+                        class_name = (
+                            names.get(class_id, str(class_id))
+                            if isinstance(names, dict)
+                            else names[class_id]
+                        )
+
+                        class_name_vi = CLASS_NAMES_VI.get(
+                            class_name,
+                            class_name,
+                        )
+
+                        # Tọa độ chuẩn hóa YOLO: tâm x, tâm y,
+                        # chiều rộng và chiều cao, trong khoảng 0–1.
                         xywhn = box.xywhn[0].tolist()
+
+                        # Tọa độ pixel của bounding box.
+                        xyxy = box.xyxy[0].tolist()
 
                         rows.append(
                             {
-                                "Lớp dự đoán": result.names[class_id],
-                                "Confidence": round(
-                                    float(box.conf.item()), 4
-                                ),
-                                "x_center": round(xywhn[0], 4),
-                                "y_center": round(xywhn[1], 4),
-                                "width": round(xywhn[2], 4),
-                                "height": round(xywhn[3], 4),
+                                "Lớp bệnh": class_name_vi,
+                                "Tên lớp": class_name,
+                                "Confidence (%)": round(score * 100, 2),
+                                "x_center": round(xywhn[0], 5),
+                                "y_center": round(xywhn[1], 5),
+                                "width": round(xywhn[2], 5),
+                                "height": round(xywhn[3], 5),
+                                "X1 (px)": round(xyxy[0], 1),
+                                "Y1 (px)": round(xyxy[1], 1),
+                                "X2 (px)": round(xyxy[2], 1),
+                                "Y2 (px)": round(xyxy[3], 1),
                             }
                         )
+
+                    df = pd.DataFrame(rows)
 
                     st.markdown("")
                     st.markdown(
@@ -409,46 +499,49 @@ if uploaded_file is not None:
                     )
 
                     st.dataframe(
-                        pd.DataFrame(rows),
+                        df,
                         use_container_width=True,
                         hide_index=True,
                     )
 
-                    csv_data = pd.DataFrame(rows).to_csv(
-                        index=False
-                    ).encode("utf-8-sig")
-
                     st.download_button(
                         "⬇️ Tải bảng kết quả CSV",
-                        data=csv_data,
+                        data=df.to_csv(
+                            index=False
+                        ).encode("utf-8-sig"),
                         file_name="tomato_detection_results.csv",
                         mime="text/csv",
                     )
+
                 else:
                     st.warning(
-                        "Không phát hiện đối tượng ở ngưỡng hiện tại. "
-                        "Bạn có thể giảm confidence và thử lại."
+                        "Không phát hiện được đối tượng ở ngưỡng hiện tại. "
+                        "Hãy thử giảm confidence xuống 0.10–0.20, "
+                        "kiểm tra ảnh có lá cà chua rõ nét và xác nhận "
+                        "ứng dụng đang sử dụng đúng checkpoint đã huấn luyện."
                     )
 
             except Exception as exc:
-                st.error(
-                    f"Đã xảy ra lỗi khi nhận diện: {exc}"
-                )
+                st.error("Đã xảy ra lỗi khi nhận diện.")
+                st.code(str(exc))
+
                 st.info(
-                    "Nếu lỗi liên quan đến Kaggle, hãy kiểm tra "
-                    "Secrets và log của ứng dụng Streamlit Cloud."
+                    "Nếu lỗi liên quan đến Kaggle, hãy kiểm tra token, "
+                    "quyền truy cập dataset và đường dẫn checkpoint."
                 )
 
     except Exception as exc:
         st.error(f"Không thể đọc ảnh này: {exc}")
 
 else:
-    st.markdown("")
     st.info(
         "👆 Tải ảnh lá cà chua lên để xem ảnh và bắt đầu nhận diện."
     )
 
-# ==================== CHÂN TRANG ====================
+
+# ============================================================
+# 7. CHÂN TRANG
+# ============================================================
 
 st.divider()
 
