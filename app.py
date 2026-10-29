@@ -1,5 +1,8 @@
 import time
+import os
+import tempfile
 
+import cv2
 import pandas as pd
 import streamlit as st
 from PIL import Image, ImageOps
@@ -536,6 +539,249 @@ if uploaded_file is not None:
 else:
     st.info(
         "👆 Tải ảnh lá cà chua lên để xem ảnh và bắt đầu nhận diện."
+    )
+
+# ============================================================
+# 6.1. DEMO PHÁT HIỆN BỆNH TRÊN VIDEO
+# ============================================================
+
+st.divider()
+
+st.markdown(
+    '<div class="section-title">🎬 Demo phát hiện bệnh trên video</div>',
+    unsafe_allow_html=True,
+)
+
+st.caption(
+    "Tải video lá cà chua lên để mô hình phát hiện đối tượng "
+    "trên từng khung hình và tạo video kết quả."
+)
+
+uploaded_video = st.file_uploader(
+    "📤 Chọn video lá cà chua",
+    type=["mp4", "avi", "mov", "mkv"],
+    key="tomato_video",
+    help="Khuyến nghị sử dụng video ngắn để demo nhanh.",
+)
+
+# Chỉ hiển thị kết quả nếu video và cấu hình không thay đổi.
+video_signature = None
+
+if uploaded_video is not None:
+    video_signature = (
+        uploaded_video.name,
+        uploaded_video.getvalue(),
+        model_name,
+        confidence,
+        image_size,
+    )
+
+    st.markdown("### 🖼️ Video đầu vào")
+    st.video(uploaded_video)
+
+    if st.button(
+        "🔍 Bắt đầu nhận diện video",
+        type="primary",
+        use_container_width=True,
+        key="start_video_detection",
+    ):
+        try:
+            with st.spinner(f"Đang tải mô hình {model_name}..."):
+                model = load_model(model_name)
+
+            with tempfile.TemporaryDirectory() as temp_dir:
+                input_path = os.path.join(temp_dir, "input_video.mp4")
+                output_path = os.path.join(temp_dir, "output_video.mp4")
+
+                # Lưu video tải lên vào file tạm.
+                with open(input_path, "wb") as file:
+                    file.write(uploaded_video.getvalue())
+
+                cap = cv2.VideoCapture(input_path)
+
+                if not cap.isOpened():
+                    st.error(
+                        "Không đọc được video. "
+                        "Hãy thử video MP4 khác."
+                    )
+                else:
+                    fps = cap.get(cv2.CAP_PROP_FPS)
+                    total_frames = int(
+                        cap.get(cv2.CAP_PROP_FRAME_COUNT)
+                    )
+                    width = int(
+                        cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+                    )
+                    height = int(
+                        cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+                    )
+
+                    if not fps or fps <= 0:
+                        fps = 25.0
+
+                    if width <= 0 or height <= 0:
+                        cap.release()
+                        st.error(
+                            "Không xác định được kích thước video."
+                        )
+                    else:
+                        writer = cv2.VideoWriter(
+                            output_path,
+                            cv2.VideoWriter_fourcc(*"mp4v"),
+                            fps,
+                            (width, height),
+                        )
+
+                        if not writer.isOpened():
+                            cap.release()
+                            st.error(
+                                "Không tạo được video đầu ra."
+                            )
+                        else:
+                            progress = st.progress(0)
+                            status = st.empty()
+
+                            frame_count = 0
+                            detection_count = 0
+                            highest_confidence = 0.0
+                            inference_time_total = 0.0
+
+                            while True:
+                                ret, frame = cap.read()
+
+                                if not ret:
+                                    break
+
+                                start_time = time.perf_counter()
+
+                                result = model.predict(
+                                    source=frame,
+                                    conf=confidence,
+                                    imgsz=image_size,
+                                    verbose=False,
+                                )[0]
+
+                                inference_time_total += (
+                                    time.perf_counter() - start_time
+                                ) * 1000
+
+                                boxes = result.boxes
+
+                                if (
+                                    boxes is not None
+                                    and len(boxes) > 0
+                                ):
+                                    detection_count += len(boxes)
+
+                                    frame_max_conf = float(
+                                        boxes.conf.max().item()
+                                    )
+
+                                    highest_confidence = max(
+                                        highest_confidence,
+                                        frame_max_conf,
+                                    )
+
+                                # result.plot() trả về ảnh BGR,
+                                # phù hợp trực tiếp với OpenCV VideoWriter.
+                                annotated_frame = result.plot()
+                                writer.write(annotated_frame)
+
+                                frame_count += 1
+
+                                if total_frames > 0:
+                                    progress.progress(
+                                        min(
+                                            frame_count / total_frames,
+                                            1.0,
+                                        )
+                                    )
+
+                                status.write(
+                                    f"Đang xử lý frame "
+                                    f"{frame_count}/"
+                                    f"{total_frames if total_frames > 0 else '?'}"
+                                )
+
+                            cap.release()
+                            writer.release()
+
+                            if frame_count == 0:
+                                st.error(
+                                    "Không có khung hình hợp lệ "
+                                    "để xử lý."
+                                )
+                            else:
+                                # Đọc dữ liệu trước khi xóa file tạm.
+                                with open(output_path, "rb") as file:
+                                    output_bytes = file.read()
+
+                                st.session_state["video_result"] = {
+                                    "signature": video_signature,
+                                    "bytes": output_bytes,
+                                    "model": model_name,
+                                    "frames": frame_count,
+                                    "detections": detection_count,
+                                    "max_conf": highest_confidence,
+                                    "avg_inference": (
+                                        inference_time_total / frame_count
+                                    ),
+                                }
+
+                                progress.progress(1.0)
+                                status.success(
+                                    "Đã xử lý video thành công!"
+                                )
+
+        except Exception as exc:
+            st.error("Đã xảy ra lỗi khi nhận diện video.")
+            st.code(str(exc))
+
+# Hiển thị video kết quả.
+saved_video = st.session_state.get("video_result")
+
+if (
+    uploaded_video is not None
+    and saved_video is not None
+    and saved_video["signature"] == video_signature
+):
+    st.markdown("### 🎥 Video sau nhận diện")
+
+    st.video(saved_video["bytes"])
+
+    st.download_button(
+        "⬇️ Tải video kết quả",
+        data=saved_video["bytes"],
+        file_name="tomato_detection_result.mp4",
+        mime="video/mp4",
+        key="download_tomato_video",
+    )
+
+    st.markdown("### 📊 Thống kê video")
+
+    m1, m2, m3 = st.columns(3)
+
+    m1.metric(
+        "Số khung hình đã xử lý",
+        saved_video["frames"],
+    )
+
+    m2.metric(
+        "Tổng lượt phát hiện",
+        saved_video["detections"],
+    )
+
+    m3.metric(
+        "Confidence cao nhất",
+        f'{saved_video["max_conf"]:.1%}',
+    )
+
+    st.caption(
+        f'Mô hình: {saved_video["model"]} · '
+        f'Ngưỡng confidence: {confidence:.2f} · '
+        f'Image size: {image_size}px · '
+        f'Thời gian suy luận trung bình: '
+        f'{saved_video["avg_inference"]:.1f} ms/frame'
     )
 
 
