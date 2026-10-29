@@ -198,13 +198,14 @@ st.markdown(
 
 # ==================== CẤU HÌNH ====================
 
+
 with st.sidebar:
     st.markdown("## ⚙️ Cấu hình nhận diện")
     st.caption("Tùy chỉnh mô hình trước khi phân tích ảnh.")
 
     model_name = st.selectbox(
         "🤖 Mô hình AI",
-        ["YOLOv8n", "YOLO11n", "YOLO11s"],
+        ["YOLOv8n", "YOLO11n", "YOLO11s", "RT-DETR-L"],
         index=1,
     )
 
@@ -229,9 +230,10 @@ with st.sidebar:
     st.divider()
 
     st.markdown("### 📌 Thông tin")
-    st.caption("YOLOv8n · YOLO11n · YOLO11s")
+    st.caption("YOLOv8n · YOLO11n · YOLO11s · RT-DETR-L")
     st.caption("Đầu vào: JPG, JPEG, PNG, WEBP")
-    st.caption("Đầu ra: Bounding box và confidence")
+    st.caption("Đầu ra: Bounding box, lớp bệnh và confidence")
+
 
 # ==================== TẢI ẢNH ====================
 
