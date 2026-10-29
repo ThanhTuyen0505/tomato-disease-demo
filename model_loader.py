@@ -1,15 +1,13 @@
 import os
 import subprocess
-import zipfile
 from pathlib import Path
 
 import streamlit as st
 from ultralytics import YOLO
 
 DATA_DIR = Path("/tmp/tomato_models")
-KAGGLE_DATASET_ID = "thanhtuanh/tomato-detection-models"
+DATASET_ID = "thanhtuanh/tomato-detection-models"
 
-# Tên mô hình và tên checkpoint dự kiến trong Dataset
 MODEL_FILES = {
     "YOLOv8n": "yolov8n.pt",
     "YOLO11n": "yolo11n.pt",
@@ -17,17 +15,23 @@ MODEL_FILES = {
     "RT-DETR-L": "rtdetr-l.pt",
 }
 
-# Các thư mục kết quả huấn luyện có thể chứa checkpoint đã chọn.
-MODEL_SEARCH_HINTS = {
-    "YOLOv8n": ["yolov8n", "yolov8"],
-    "YOLO11n": ["yolo11n", "yolo11"],
-    "YOLO11s": ["yolo11s", "yolo11"],
-    "RT-DETR-L": ["rtdetr-l", "rtdetr"],
-}
+
+def kaggle_env():
+    token = st.secrets.get("KAGGLE_API_TOKEN", "")
+
+    if not token:
+        raise RuntimeError(
+            "Thiếu KAGGLE_API_TOKEN trong Streamlit Secrets. "
+            "Hãy kiểm tra token của tài khoản Kaggle có quyền "
+            "truy cập Dataset."
+        )
+
+    env = os.environ.copy()
+    env["KAGGLE_API_TOKEN"] = token
+    return env
 
 
-def run_kaggle_command(args, env):
-    """Chạy lệnh Kaggle và trả về thông báo lỗi nếu thất bại."""
+def run_kaggle(args, env):
     result = subprocess.run(
         args,
         env=env,
@@ -38,114 +42,101 @@ def run_kaggle_command(args, env):
 
     if result.returncode != 0:
         detail = (result.stderr or result.stdout).strip()
+
+        if "404" in detail:
+            raise RuntimeError(
+                "Kaggle API trả về 404 khi truy cập Dataset.\n\n"
+                "Mã Dataset: " + DATASET_ID + "\n\n"
+                "Hãy kiểm tra:\n"
+                "1. Dataset có tồn tại và tài khoản API có quyền truy cập.\n"
+                "2. KAGGLE_API_TOKEN thuộc đúng tài khoản Kaggle.\n"
+                "3. Token được tạo tại Kaggle Settings > API.\n\n"
+                "Chi tiết API: " + detail[-1500:]
+            )
+
         raise RuntimeError(
-            f"Lệnh Kaggle thất bại: {' '.join(args)}\n"
-            f"Chi tiết: {detail[-2500:]}"
+            "Lệnh Kaggle thất bại:\n" + detail[-2000:]
         )
 
     return result.stdout
 
 
-def download_dataset():
-    """Tải và giải nén Dataset nếu chưa có dữ liệu."""
+def download_models():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-    token = st.secrets.get("KAGGLE_API_TOKEN", "")
-    if not token:
-        raise RuntimeError(
-            "Thiếu KAGGLE_API_TOKEN trong Streamlit Cloud → "
-            "App settings → Secrets."
-        )
+    # Không tải lại nếu đã có đủ bốn file ở thư mục gốc.
+    if all((DATA_DIR / f).is_file() for f in MODEL_FILES.values()):
+        return
 
-    env = os.environ.copy()
-    env["KAGGLE_API_TOKEN"] = token
+    env = kaggle_env()
 
-    # Kiểm tra quyền truy cập và mã Dataset trước khi tải.
-    run_kaggle_command(
+    # Kiểm tra Dataset trước khi tải để tránh tải dữ liệu lớn vô ích.
+    listing = run_kaggle(
         [
             "kaggle",
             "datasets",
             "files",
-            KAGGLE_DATASET_ID,
+            DATASET_ID,
             "--page-size",
             "100",
         ],
         env,
     )
 
-    # Tải ZIP vào thư mục riêng.
-    zip_path = DATA_DIR / "dataset.zip"
+    # Chỉ tải các checkpoint có tên ở thư mục gốc Dataset.
+    # Không tải cả thư mục tomato_results 18 GB.
+    for filename in MODEL_FILES.values():
+        target = DATA_DIR / filename
 
-    run_kaggle_command(
-        [
-            "kaggle",
-            "datasets",
-            "download",
-            "-d",
-            KAGGLE_DATASET_ID,
-            "-p",
-            str(DATA_DIR),
-            "-f",
-            "tomato_results",
-        ],
-        env,
-    )
-
-    # Nếu Kaggle tải một ZIP có tên khác, tìm ZIP mới nhất.
-    zip_files = list(DATA_DIR.glob("*.zip"))
-    if not zip_files:
-        raise FileNotFoundError(
-            "Không tìm thấy file ZIP sau khi tải Dataset."
-        )
-
-    # Giải nén tất cả ZIP trong Dataset; bỏ qua ZIP đã giải nén.
-    for archive in zip_files:
-        try:
-            with zipfile.ZipFile(archive) as zf:
-                zf.extractall(DATA_DIR)
-        except zipfile.BadZipFile:
+        if target.is_file():
             continue
 
-
-def find_checkpoint(model_name):
-    """Tìm checkpoint trong Dataset và các thư mục con."""
-    expected = MODEL_FILES[model_name]
-
-    # Ưu tiên file có tên chính xác, ở bất kỳ thư mục con nào.
-    matches = list(DATA_DIR.rglob(expected))
-    if matches:
-        return matches[0]
-
-    # Nếu tên file khác, chỉ tìm trong thư mục có tên phù hợp.
-    hints = MODEL_SEARCH_HINTS[model_name]
-    candidates = []
-
-    for path in DATA_DIR.rglob("*.pt"):
-        normalized = str(path).lower()
-        if any(hint in normalized for hint in hints):
-            candidates.append(path)
-
-    # Ưu tiên checkpoint đã chọn hoặc best.pt.
-    candidates.sort(
-        key=lambda p: (
-            "selected_model" not in p.name.lower(),
-            p.name.lower() != "best.pt",
-            len(str(p)),
+        run_kaggle(
+            [
+                "kaggle",
+                "datasets",
+                "download",
+                "-d",
+                DATASET_ID,
+                "-f",
+                filename,
+                "-p",
+                str(DATA_DIR),
+                "--force",
+            ],
+            env,
         )
-    )
 
-    if candidates:
-        return candidates[0]
+        # Kaggle trả về file ZIP; giải nén file cần thiết.
+        import zipfile
 
-    available = [
-        str(p.relative_to(DATA_DIR))
-        for p in DATA_DIR.rglob("*.pt")
-    ]
+        zip_files = list(DATA_DIR.glob("*.zip"))
+        extracted = False
 
-    raise FileNotFoundError(
-        f"Không tìm thấy checkpoint cho {model_name}.\n"
-        f"Các file .pt tìm thấy: {available[:50] or 'Không có'}"
-    )
+        for archive in zip_files:
+            try:
+                with zipfile.ZipFile(archive) as zf:
+                    members = zf.namelist()
+
+                    for member in members:
+                        if Path(member).name == filename:
+                            destination = DATA_DIR / filename
+                            with zf.open(member) as source:
+                                destination.write_bytes(source.read())
+                            extracted = True
+                            break
+
+                if extracted:
+                    break
+
+            except zipfile.BadZipFile:
+                continue
+
+        if not extracted and not target.is_file():
+            raise FileNotFoundError(
+                f"Không tải được {filename}.\n"
+                "Danh sách file Dataset:\n" + listing[:3000]
+            )
 
 
 @st.cache_resource
@@ -153,9 +144,13 @@ def load_model(model_name):
     if model_name not in MODEL_FILES:
         raise ValueError(f"Tên mô hình không hợp lệ: {model_name}")
 
-    # Chỉ tải khi chưa có file dữ liệu.
-    if not any(DATA_DIR.rglob("*.pt")):
-        download_dataset()
+    download_models()
 
-    checkpoint = find_checkpoint(model_name)
-    return YOLO(str(checkpoint))
+    model_path = DATA_DIR / MODEL_FILES[model_name]
+
+    if not model_path.is_file():
+        raise FileNotFoundError(
+            f"Không tìm thấy file mô hình: {model_path}"
+        )
+
+    return YOLO(str(model_path))
