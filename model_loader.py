@@ -1,56 +1,48 @@
 
-import os
-import shutil
-import subprocess
-from pathlib import Path
-
-import streamlit as st
-from ultralytics import YOLO
-
-DATA_DIR = Path("/tmp/yolodemo")
-
-# Dataset ID trên Kaggle
-KAGGLE_DATASET_ID = "thanhtuanh/tomato-detection-models"
-
-# Đường dẫn tương đối của 4 mô hình trong Dataset
-MODEL_RELATIVE_PATHS = {
-    "YOLOv8n": Path(
-        "tomato_results_archive/YOLOv8n/selected/selected_model.pt"
-    ),
-    "YOLO11n": Path(
-        "tomato_results_archive/YOLO11n/selected/selected_model.pt"
-    ),
-    "YOLO11s": Path(
-        "tomato_results_archive/YOLO11s/selected/selected_model.pt"
-    ),
-    "RT-DETR-L": Path(
-        "tomato_results_archive/RT-DETR-L/selected/selected_model.pt"
-    ),
-}
-
-
 def download_models():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Không tải lại nếu đã có đủ 4 mô hình
     if all(
         (DATA_DIR / path).is_file()
         for path in MODEL_RELATIVE_PATHS.values()
     ):
         return
 
-    token = st.secrets.get("KAGGLE_API_TOKEN")
+    token = st.secrets.get("KAGGLE_API_TOKEN", "")
 
     if not token:
         raise RuntimeError(
-            "Chưa cấu hình KAGGLE_API_TOKEN trong "
-            "Streamlit Secrets."
+            "Thiếu KAGGLE_API_TOKEN trong Streamlit Secrets."
         )
 
     env = os.environ.copy()
     env["KAGGLE_API_TOKEN"] = token
 
-    # Tải và giải nén Dataset từ Kaggle
+    # Bước 1: kiểm tra quyền truy cập và ID Dataset
+    check = subprocess.run(
+        [
+            "kaggle",
+            "datasets",
+            "files",
+            KAGGLE_DATASET_ID,
+            "--page-size",
+            "200",
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    if check.returncode != 0:
+        detail = (check.stderr or check.stdout).strip()
+
+        raise RuntimeError(
+            f"Không truy cập được Dataset {KAGGLE_DATASET_ID}.\n"
+            f"Chi tiết từ Kaggle:\n{detail[-2500:]}"
+        )
+
+    # Bước 2: tải Dataset
     result = subprocess.run(
         [
             "kaggle",
@@ -61,7 +53,7 @@ def download_models():
             "-p",
             str(DATA_DIR),
             "--unzip",
-            "--quiet",
+            "--force",
         ],
         env=env,
         capture_output=True,
@@ -70,12 +62,14 @@ def download_models():
     )
 
     if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+
         raise RuntimeError(
-            "Tải Kaggle Dataset thất bại:\n"
-            + (result.stderr or result.stdout)[-2000:]
+            f"Kaggle tìm thấy Dataset nhưng tải thất bại.\n"
+            f"Chi tiết:\n{detail[-2500:]}"
         )
 
-    # Kiểm tra các mô hình còn thiếu
+    # Bước 3: kiểm tra file trọng số
     missing = [
         name
         for name, relative_path in MODEL_RELATIVE_PATHS.items()
@@ -83,14 +77,13 @@ def download_models():
     ]
 
     if missing:
-        # Tìm các file selected_model.pt trong Dataset
         found = list(DATA_DIR.rglob("selected_model.pt"))
 
         for name in missing:
             matches = [
-                p for p in found
-                if p.parent.name == "selected"
-                and p.parent.parent.name == name
+                path for path in found
+                if path.parent.name == "selected"
+                and path.parent.parent.name == name
             ]
 
             if matches:
@@ -100,7 +93,6 @@ def download_models():
                 if matches[0] != target:
                     shutil.copy2(matches[0], target)
 
-    # Kiểm tra lại sau khi tìm kiếm
     missing = [
         name
         for name, relative_path in MODEL_RELATIVE_PATHS.items()
@@ -109,19 +101,7 @@ def download_models():
 
     if missing:
         raise FileNotFoundError(
-            "Không tìm thấy các mô hình: "
+            "Dataset đã tải nhưng thiếu mô hình: "
             + ", ".join(missing)
-            + ". Hãy kiểm tra đường dẫn file trong Dataset."
+            + ". Hãy kiểm tra đường dẫn file bên trong Dataset."
         )
-
-
-@st.cache_resource
-def load_model(model_name):
-    download_models()
-
-    if model_name not in MODEL_RELATIVE_PATHS:
-        raise ValueError(f"Mô hình không hợp lệ: {model_name}")
-
-    model_path = DATA_DIR / MODEL_RELATIVE_PATHS[model_name]
-
-    return YOLO(str(model_path))
