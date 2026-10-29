@@ -1,62 +1,52 @@
-
 import os
-import shutil
 import subprocess
+import zipfile
 from pathlib import Path
 
 import streamlit as st
 from ultralytics import YOLO
 
 DATA_DIR = Path("/tmp/tomato-detection-models")
+DATASET_ID = "thanhtuanh/tomato-detection-models"
 
-MODEL_RELATIVE_PATHS = {
-    "YOLOv8n": Path(
-        "tomato_results/YOLOv8n/selected/selected_model.pt"
-    ),
-    "YOLO11n": Path(
-        "tomato_results/YOLO11n/selected/selected_model.pt"
-    ),
-    "YOLO11s": Path(
-        "tomato_results/YOLO11s/selected/selected_model.pt"
-    ),
+MODEL_FILES = {
+    "YOLOv8n": "tomato_results/YOLOv8n/selected/selected_model.pt",
+    "YOLO11n": "tomato_results/YOLO11n/selected/selected_model.pt",
+    "YOLO11s": "tomato_results/YOLO11s/selected/selected_model.pt",
+    "RT-DETR-L": "tomato_results/RT-DETR-L/selected/selected_model.pt",
 }
 
 
-def download_models():
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
+def download_one_model(model_name, relative_path):
+    model_dir = DATA_DIR / model_name
+    model_dir.mkdir(parents=True, exist_ok=True)
 
-    # Đã có đủ model thì không tải lại
-    if all(
-        (DATA_DIR / path).is_file()
-        for path in MODEL_RELATIVE_PATHS.values()
-    ):
-        return
+    target = model_dir / "selected_model.pt"
 
-    token = st.secrets.get("KAGGLE_API_TOKEN")
+    if target.is_file() and target.stat().st_size > 0:
+        return target
+
+    token = st.secrets.get("KAGGLE_API_TOKEN", "")
     if not token:
         raise RuntimeError(
-            "Chưa cấu hình KAGGLE_API_TOKEN trong Streamlit Secrets."
+            "Thiếu KAGGLE_API_TOKEN trong Streamlit Secrets."
         )
 
     env = os.environ.copy()
-    env["KAGGLE_API_TOKEN"] = token
+    env["KAGGLE_API_TOKEN"] = str(token)
 
-    # Xóa ZIP cũ nếu lần tải trước bị lỗi
-    for zip_file in DATA_DIR.glob("*.zip"):
-        zip_file.unlink(missing_ok=True)
+    command = [
+        "kaggle",
+        "datasets",
+        "download",
+        "-d", DATASET_ID,
+        "-f", relative_path,
+        "-p", str(model_dir),
+        "--force",
+    ]
 
     result = subprocess.run(
-        [
-            "kaggle",
-            "datasets",
-            "download",
-            "-d",
-            "thanhtuanh/tomato-detection-models",
-            "-p",
-            str(DATA_DIR),
-            "--unzip",
-            "--quiet",
-        ],
+        command,
         env=env,
         capture_output=True,
         text=True,
@@ -64,49 +54,74 @@ def download_models():
     )
 
     if result.returncode != 0:
+        details = (result.stderr or result.stdout or "Không có chi tiết")[-2000:]
         raise RuntimeError(
-            "Kaggle tải Dataset thất bại.\n"
-            + (result.stderr or result.stdout)[-2000:]
+            f"Không tải được {model_name} từ Kaggle.\n"
+            f"Đường dẫn: {relative_path}\n"
+            f"Chi tiết: {details}"
         )
 
-    missing = [
-        name
-        for name, relative_path in MODEL_RELATIVE_PATHS.items()
-        if not (DATA_DIR / relative_path).is_file()
-    ]
+    # Kaggle thường trả về ZIP; chỉ giải nén checkpoint cần thiết.
+    zip_files = list(model_dir.glob("*.zip"))
 
-    if missing:
-        # Tìm các model nếu Dataset có thư mục bao ngoài
-        found = list(DATA_DIR.rglob("selected_model.pt"))
+    if zip_files:
+        extracted = None
 
-        for name in missing[:]:
-            expected = MODEL_RELATIVE_PATHS[name]
-            matches = [
-                p for p in found
-                if p.parent.name == "selected"
-                and p.parent.parent.name == name
-            ]
+        for zip_path in zip_files:
+            try:
+                with zipfile.ZipFile(zip_path, "r") as archive:
+                    matches = [
+                        name for name in archive.namelist()
+                        if name.endswith("selected_model.pt")
+                    ]
 
-            if matches:
-                target = DATA_DIR / expected
-                target.parent.mkdir(parents=True, exist_ok=True)
-                if matches[0] != target:
-                    shutil.copy2(matches[0], target)
+                    if matches:
+                        # Chỉ lấy đúng file checkpoint, không giải nén toàn bộ.
+                        with archive.open(matches[0]) as src:
+                            with target.open("wb") as dst:
+                                while True:
+                                    chunk = src.read(1024 * 1024)
+                                    if not chunk:
+                                        break
+                                    dst.write(chunk)
+                        extracted = target
+                        break
+            except zipfile.BadZipFile:
+                continue
 
-        missing = [
-            name
-            for name, relative_path in MODEL_RELATIVE_PATHS.items()
-            if not (DATA_DIR / relative_path).is_file()
-        ]
+        for zip_path in zip_files:
+            zip_path.unlink(missing_ok=True)
 
-    if missing:
+        if extracted is None:
+            raise FileNotFoundError(
+                f"Không tìm thấy selected_model.pt trong file ZIP "
+                f"của {model_name}."
+            )
+
+    # Một số phiên bản CLI có thể tạo file checkpoint trực tiếp.
+    if not target.is_file():
+        candidates = list(model_dir.rglob("selected_model.pt"))
+        if candidates:
+            candidate = candidates[0]
+            if candidate.resolve() != target.resolve():
+                target.write_bytes(candidate.read_bytes())
+
+    if not target.is_file() or target.stat().st_size == 0:
         raise FileNotFoundError(
-            "Không tìm thấy model: " + ", ".join(missing)
+            f"Checkpoint {model_name} không tồn tại hoặc bị rỗng."
         )
+
+    return target
 
 
 @st.cache_resource
 def load_model(model_name):
-    download_models()
-    model_path = DATA_DIR / MODEL_RELATIVE_PATHS[model_name]
+    if model_name not in MODEL_FILES:
+        raise ValueError(f"Mô hình không hợp lệ: {model_name}")
+
+    model_path = download_one_model(
+        model_name,
+        MODEL_FILES[model_name],
+    )
+
     return YOLO(str(model_path))
